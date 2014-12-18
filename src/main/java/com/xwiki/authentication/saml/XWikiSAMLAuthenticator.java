@@ -34,6 +34,7 @@ import java.io.InputStream;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.URLEncoder;
+import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
@@ -71,11 +72,12 @@ import org.opensaml.security.SAMLSignatureProfileValidator;
 import org.opensaml.xml.Configuration;
 import org.opensaml.xml.ConfigurationException;
 import org.opensaml.xml.XMLObject;
+import org.opensaml.xml.XMLObjectBuilderFactory;
 import org.opensaml.xml.io.Marshaller;
 import org.opensaml.xml.io.MarshallerFactory;
 import org.opensaml.xml.io.Unmarshaller;
 import org.opensaml.xml.io.UnmarshallerFactory;
-import org.opensaml.xml.parse.BasicParserPool;
+import org.opensaml.xml.parse.ParserPool;
 import org.opensaml.xml.schema.impl.XSStringImpl;
 import org.opensaml.xml.security.x509.BasicX509Credential;
 import org.opensaml.xml.signature.Signature;
@@ -84,7 +86,6 @@ import org.opensaml.xml.util.Base64;
 import org.opensaml.xml.util.XMLHelper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 
 import com.xpn.xwiki.XWiki;
@@ -185,20 +186,68 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
     /** The configured mapping between XWikiUsers fields and SAML fields. */
     private Map<String, String> userPropertiesMapping;
 
-    @Override
-    public void showLogin(XWikiContext context) throws XWikiException
-    {
-        XWikiRequest request = context.getRequest();
-        XWikiResponse response = context.getResponse();
+    private MarshallerFactory marshallers;
 
+    private ParserPool parsers;
+
+    private UnmarshallerFactory unmarshallers;
+
+    private XMLObjectBuilderFactory builders;
+
+    private SAMLSignatureProfileValidator sigProfileValidator;
+
+    private SignatureValidator sigValidator;
+
+    public XWikiSAMLAuthenticator() throws XWikiException, CertificateException, IOException
+    {
         try {
             DefaultBootstrap.bootstrap();
         } catch (ConfigurationException e) {
             LOG.error("Failed to bootstrap saml module");
             throw new XWikiException(XWikiException.MODULE_XWIKI_USER,
-                XWikiException.ERROR_XWIKI_USER_INIT,
+                XWikiException.ERROR_XWIKI_INIT_FAILED,
                 "Failed to bootstrap saml module");
         }
+
+        this.marshallers = Configuration.getMarshallerFactory();
+        this.parsers = Configuration.getParserPool();
+        this.unmarshallers = Configuration.getUnmarshallerFactory();
+        this.builders = Configuration.getBuilderFactory();
+        this.sigProfileValidator = new SAMLSignatureProfileValidator();
+
+        // Reading certificate
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        String cert = getSAMLCertificate(Utils.getContext());
+        if (StringUtils.isBlank(cert)) {
+            LOG.error("Missing configuration key [{}] in xwiki.cfg, SAML authentication is unavailable",
+                "xwiki.authentication.saml.cert");
+            throw new XWikiException(XWikiException.MODULE_XWIKI_USER,
+                XWikiException.ERROR_XWIKI_INIT_FAILED,
+                "SAML module isn't properly configured, missing certificate file configuration");
+        }
+        LOG.debug("Configured certificate for the identity provider: [{}]", cert);
+        InputStream sis = this.environment.getResourceAsStream(cert);
+        try {
+            if (sis == null) {
+                LOG.error("Missing or unreadable SAML IdP certificate [{}]", cert);
+                throw new XWikiException(XWikiException.MODULE_XWIKI_USER,
+                    XWikiException.ERROR_XWIKI_INIT_FAILED,
+                    "SAML module isn't properly configured, missing certificate file");
+            }
+            X509Certificate certificate = (X509Certificate) cf.generateCertificate(sis);
+            BasicX509Credential credential = new BasicX509Credential();
+            credential.setEntityCertificate(certificate);
+            this.sigValidator = new SignatureValidator(credential);
+        } finally {
+            sis.close();
+        }
+    }
+
+    @Override
+    public void showLogin(XWikiContext context) throws XWikiException
+    {
+        XWikiRequest request = context.getRequest();
+        XWikiResponse response = context.getResponse();
 
         // Generate ID
         String randId = RandomStringUtils.randomAlphanumeric(42);
@@ -219,7 +268,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
         request.getSession().setAttribute("saml_id", randId);
 
         // Create an issuer Object
-        IssuerBuilder issuerBuilder = new IssuerBuilder();
+        IssuerBuilder issuerBuilder = (IssuerBuilder) this.builders.getBuilder(Issuer.DEFAULT_ELEMENT_NAME);
         Issuer issuer = issuerBuilder.buildObject();
         issuer.setValue(getSAMLIssuer(context));
 
@@ -261,9 +310,8 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
             LOG.debug("Assertion Consumer Service URL: [{}]", authRequest.getAssertionConsumerServiceURL());
         }
 
-        // Now we must build our representation to put into the html form to be submitted to the idp
-        MarshallerFactory mfact = Configuration.getMarshallerFactory();
-        Marshaller marshaller = mfact.getMarshaller(authRequest);
+        // Now we must build our representation to put into the html form to be submitted to the IdP
+        Marshaller marshaller = this.marshallers.getMarshaller(authRequest);
         if (marshaller == null) {
             LOG.error("Failed to get marshaller for [{}]", authRequest);
             throw new XWikiException(XWikiException.MODULE_XWIKI_USER,
@@ -305,15 +353,16 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
     @Override
     public XWikiUser checkAuth(XWikiContext context) throws XWikiException
     {
-        // check in the session if the user is already authenticated
-        String samlUserName = getAuthFieldValue(context);
+        // Check in the session if the user is already authenticated
+        String samlUserName = getSAMLAuthenticatedUserFromSession(context);
         if (samlUserName == null) {
-            // check if we have a SAML Response to verify
+            // Check if we have a SAML Response to verify
             if (checkSAMLResponse(context)) {
+                // Successfully authenticated, a redirect to the originally requested URL is already sent
                 return null;
             }
 
-            // check standard authentication
+            // Check standard authentication
             if (context.getRequest().getCookie("username") != null || context.getAction().equals("logout")
                 || context.getAction().startsWith("login")) {
                 LOG.debug("Fallback to standard authentication");
@@ -335,9 +384,11 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
     public XWikiUser checkAuth(String username, String password, String rememberme, XWikiContext context)
         throws XWikiException
     {
-        String auth = getAuthFieldValue(context);
+        // We can't validate a password, so we either forward to the default authenticator or return the cached auth
+        String auth = getSAMLAuthenticatedUserFromSession(context);
 
         if (StringUtils.isEmpty(auth)) {
+            // No SAML authentication, try standard authentication
             return super.checkAuth(context);
         } else {
             return checkAuth(context);
@@ -346,7 +397,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
 
     private boolean checkSAMLResponse(XWikiContext context) throws XWikiException
     {
-        // read from SAMLResponse
+        // Read from SAMLResponse
         XWikiRequest request = context.getRequest();
         Map<String, String> attributes = new HashMap<String, String>();
 
@@ -357,39 +408,21 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
 
         try {
             LOG.debug("Reading SAML Response");
-            samlResponse = new String(Base64.decode(samlResponse), "UTF-8");
+            samlResponse = new String(Base64.decode(samlResponse), XWiki.DEFAULT_ENCODING);
 
             LOG.debug("SAML Response is [{}]", samlResponse);
 
-            // Get parser pool manager
-            BasicParserPool ppMgr = new BasicParserPool();
-            ppMgr.setNamespaceAware(true);
-            Document inCommonMDDoc;
-
-            inCommonMDDoc = ppMgr.parse(new StringReader(samlResponse));
-            Element ResponseRoot = inCommonMDDoc.getDocumentElement();
-            // Get apropriate unmarshaller
-            UnmarshallerFactory unmarshallerFactory = Configuration.getUnmarshallerFactory();
-            Unmarshaller unmarshaller = unmarshallerFactory.getUnmarshaller(ResponseRoot);
-            // Unmarshall using the document root element, an EntitiesDescriptor
-            Response response = (Response) unmarshaller.unmarshall(ResponseRoot);
-
-            // reading cert
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            String cert = getSAMLCertificate(context);
-            LOG.debug("Verification signature using certificate [{}]", cert);
-            InputStream sis = this.environment.getResourceAsStream(cert);
-            X509Certificate certificate = (X509Certificate) cf.generateCertificate(sis);
-            sis.close();
+            // Parse the response
+            Element responseRoot = this.parsers.parse(new StringReader(samlResponse)).getDocumentElement();
+            // Get appropriate unmarshaller
+            Unmarshaller unmarshaller = this.unmarshallers.getUnmarshaller(responseRoot);
+            // Unmarshall using the document root element
+            Response response = (Response) unmarshaller.unmarshall(responseRoot);
 
             response.validate(true);
             Signature signature = response.getSignature();
-            SAMLSignatureProfileValidator pv = new SAMLSignatureProfileValidator();
-            pv.validate(signature);
-            BasicX509Credential credential = new BasicX509Credential();
-            credential.setEntityCertificate(certificate);
-            SignatureValidator sigValidator = new SignatureValidator(credential);
-            sigValidator.validate(signature);
+            this.sigProfileValidator.validate(signature);
+            this.sigValidator.validate(signature);
 
             boolean isValidDate = true;
 
@@ -578,7 +611,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
         return context.getWiki().Param("xwiki.authentication.saml.namequalifier");
     }
 
-    private String getAuthFieldValue(XWikiContext context)
+    private String getSAMLAuthenticatedUserFromSession(XWikiContext context)
     {
         return (String) context.getRequest().getSession(true).getAttribute(getAuthFieldName(context));
     }
