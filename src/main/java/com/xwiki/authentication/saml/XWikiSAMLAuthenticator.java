@@ -203,7 +203,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
         try {
             DefaultBootstrap.bootstrap();
         } catch (ConfigurationException e) {
-            LOG.error("Failed to bootstrap saml module");
+            LOG.error("Failed to bootstrap saml module: {}", e.getMessage());
             throw new XWikiException(XWikiException.MODULE_XWIKI_USER,
                 XWikiException.ERROR_XWIKI_INIT_FAILED,
                 "Failed to bootstrap saml module");
@@ -346,6 +346,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
                 response.sendRedirect(url);
                 context.setFinished(true);
             } catch (IOException e) {
+                // Should not happen
             }
         }
     }
@@ -454,8 +455,8 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
 
             String samlid1 = response.getInResponseTo();
             String samlid2 = (String) request.getSession().getAttribute("saml_id");
-            if (isValidDate == false) {
-                // invalid ID
+            if (!isValidDate) {
+                // Invalid date
                 LOG.error("SAML Dates are invalid");
                 return false;
             }
@@ -553,7 +554,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
                         }
                     }
 
-                    if (updated == true) {
+                    if (updated) {
                         context.getWiki().saveDocument(userDoc, context);
                         LOG.debug("User [{}] has been successfully updated", userReference);
                     }
@@ -567,9 +568,8 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
             }
         }
 
-        LOG.debug("Setting authentication in session for user [{}]" + validUserName);
-
-        // mark that we have authenticated the user in the session
+        // Mark in the current session that we have authenticated the user
+        LOG.debug("Setting authentication in session for user [{}]" + userReference);
         if (userReference != null) {
             context.getRequest().getSession().setAttribute(getAuthFieldName(context),
                 this.compactStringEntityReferenceSerializer.serialize(userReference));
@@ -577,7 +577,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
             context.getRequest().getSession().setAttribute(getAuthFieldName(context), null);
         }
 
-        // need to redirect now
+        // Successfully logged in, redirect to the originally requested URL
         try {
             String sourceurl = (String) request.getSession().getAttribute("saml_url");
             LOG.debug("Redirecting after valid authentication to [{}]", sourceurl);
@@ -585,8 +585,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
             context.setFinished(true);
             return true;
         } catch (IOException e) {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
+            // Should never happen
         }
         return false;
     }
