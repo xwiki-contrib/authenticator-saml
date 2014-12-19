@@ -57,7 +57,6 @@ import org.opensaml.saml2.core.AuthnContext;
 import org.opensaml.saml2.core.AuthnContextClassRef;
 import org.opensaml.saml2.core.AuthnContextComparisonTypeEnumeration;
 import org.opensaml.saml2.core.AuthnRequest;
-import org.opensaml.saml2.core.EncryptedAttribute;
 import org.opensaml.saml2.core.Issuer;
 import org.opensaml.saml2.core.NameIDPolicy;
 import org.opensaml.saml2.core.NameIDType;
@@ -84,6 +83,7 @@ import org.opensaml.xml.signature.Signature;
 import org.opensaml.xml.signature.SignatureValidator;
 import org.opensaml.xml.util.Base64;
 import org.opensaml.xml.util.XMLHelper;
+import org.opensaml.xml.validation.ValidationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.w3c.dom.Element;
@@ -249,10 +249,12 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
         XWikiRequest request = context.getRequest();
         XWikiResponse response = context.getResponse();
 
-        // Generate ID
+        // Generate random request ID
         String randId = RandomStringUtils.randomAlphanumeric(42);
+        request.getSession().setAttribute("saml_id", randId);
         LOG.debug("Random ID: [{}]", randId);
 
+        // Remember the requested URL, so we can return to it afterwards
         String sourceurl = request.getParameter("xredirect");
         if (sourceurl == null) {
             if (context.getAction().startsWith("login")) {
@@ -263,47 +265,9 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
                 sourceurl = XWiki.getRequestURL(request).toString();
             }
         }
-
         request.getSession().setAttribute("saml_url", sourceurl);
-        request.getSession().setAttribute("saml_id", randId);
 
-        // Create an issuer Object
-        IssuerBuilder issuerBuilder = (IssuerBuilder) this.builders.getBuilder(Issuer.DEFAULT_ELEMENT_NAME);
-        Issuer issuer = issuerBuilder.buildObject();
-        issuer.setValue(getSAMLIssuer(context));
-
-        // Create NameIDPolicy
-        NameIDPolicyBuilder nameIdPolicyBuilder = new NameIDPolicyBuilder();
-        NameIDPolicy nameIdPolicy = nameIdPolicyBuilder.buildObject();
-        nameIdPolicy.setFormat(NameIDType.PERSISTENT);
-        nameIdPolicy.setSPNameQualifier(getSAMLNameQualifier(context));
-        nameIdPolicy.setAllowCreate(true);
-
-        // Create AuthnContextClassRef
-        AuthnContextClassRefBuilder authnContextClassRefBuilder = new AuthnContextClassRefBuilder();
-        AuthnContextClassRef authnContextClassRef = authnContextClassRefBuilder.buildObject();
-        authnContextClassRef.setAuthnContextClassRef(AuthnContext.PPT_AUTHN_CTX);
-
-        // Create RequestedAuthnContext
-        RequestedAuthnContextBuilder requestedAuthnContextBuilder = new RequestedAuthnContextBuilder();
-        RequestedAuthnContext requestedAuthnContext =
-            requestedAuthnContextBuilder.buildObject();
-        requestedAuthnContext.setComparison(AuthnContextComparisonTypeEnumeration.EXACT);
-        requestedAuthnContext.getAuthnContextClassRefs().add(authnContextClassRef);
-
-        DateTime issueInstant = new DateTime();
-        AuthnRequestBuilder authRequestBuilder = new AuthnRequestBuilder();
-        AuthnRequest authRequest = authRequestBuilder.buildObject();
-        authRequest.setForceAuthn(false);
-        authRequest.setIsPassive(false);
-        authRequest.setIssueInstant(issueInstant);
-        authRequest.setProtocolBinding(SAMLConstants.SAML2_POST_BINDING_URI);
-        authRequest.setAssertionConsumerServiceURL(getSAMLAuthenticatorURL(context));
-        authRequest.setIssuer(issuer);
-        authRequest.setNameIDPolicy(nameIdPolicy);
-        authRequest.setRequestedAuthnContext(requestedAuthnContext);
-        authRequest.setID(randId);
-        authRequest.setVersion(SAMLVersion.VERSION_20);
+        AuthnRequest authRequest = setupAuthenticationRequest(randId, context);
 
         if (LOG.isDebugEnabled()) {
             LOG.debug("New AuthnRequestImpl: [{}]", authRequest.toString());
@@ -396,6 +360,60 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
         }
     }
 
+    private AuthnRequest setupAuthenticationRequest(String randId, XWikiContext context)
+    {
+        // Create Issuer: who is making the request? This XWiki instance.
+        IssuerBuilder issuerBuilder = (IssuerBuilder) this.builders.getBuilder(Issuer.DEFAULT_ELEMENT_NAME);
+        Issuer issuer = issuerBuilder.buildObject();
+        issuer.setValue(getSAMLIssuer(context));
+
+        // Create NameIDPolicy: what type of identity to return? A persistent identifier.
+        NameIDPolicyBuilder nameIdPolicyBuilder =
+            (NameIDPolicyBuilder) this.builders.getBuilder(NameIDPolicy.DEFAULT_ELEMENT_NAME);
+        NameIDPolicy nameIdPolicy = nameIdPolicyBuilder.buildObject();
+        nameIdPolicy.setFormat(NameIDType.PERSISTENT);
+        nameIdPolicy.setSPNameQualifier(getSAMLNameQualifier(context));
+        nameIdPolicy.setAllowCreate(true);
+
+        // Create AuthnContextClassRef: what type of authentication is allowed? Password check over a secure connection.
+        AuthnContextClassRefBuilder authnContextClassRefBuilder =
+            (AuthnContextClassRefBuilder) this.builders.getBuilder(AuthnContextClassRef.DEFAULT_ELEMENT_NAME);
+        AuthnContextClassRef authnContextClassRef = authnContextClassRefBuilder.buildObject();
+        authnContextClassRef.setAuthnContextClassRef(AuthnContext.PPT_AUTHN_CTX);
+
+        // Create RequestedAuthnContext: what type of authentication is requested? At least PPT.
+        RequestedAuthnContextBuilder requestedAuthnContextBuilder =
+            (RequestedAuthnContextBuilder) this.builders.getBuilder(RequestedAuthnContext.DEFAULT_ELEMENT_NAME);
+        RequestedAuthnContext requestedAuthnContext = requestedAuthnContextBuilder.buildObject();
+        requestedAuthnContext.setComparison(AuthnContextComparisonTypeEnumeration.MINIMUM);
+        requestedAuthnContext.getAuthnContextClassRefs().add(authnContextClassRef);
+
+        // Create AuthnRequest: the actual authentication request.
+        AuthnRequestBuilder authRequestBuilder =
+            (AuthnRequestBuilder) this.builders.getBuilder(AuthnRequest.DEFAULT_ELEMENT_NAME);
+        AuthnRequest authRequest = authRequestBuilder.buildObject();
+        authRequest.setVersion(SAMLVersion.VERSION_20);
+        authRequest.setID(randId);
+        authRequest.setIssueInstant(new DateTime());
+        // Accept a previous authentication, don't force a re-check of the credentials
+        authRequest.setForceAuthn(false);
+        // Allow user interaction
+        authRequest.setIsPassive(false);
+        // Use POST-ed HTML forms for communication between the IdP and SP
+        authRequest.setProtocolBinding(SAMLConstants.SAML2_POST_BINDING_URI);
+        // Request a persistent identifier
+        authRequest.setNameIDPolicy(nameIdPolicy);
+        // Request at least a secure password check
+        authRequest.setRequestedAuthnContext(requestedAuthnContext);
+
+        // We made the request
+        authRequest.setIssuer(issuer);
+        // Send the response back to this server
+        authRequest.setAssertionConsumerServiceURL(getSAMLAuthenticatorURL(context));
+
+        return authRequest;
+    }
+
     private boolean checkSAMLResponse(XWikiContext context) throws XWikiException
     {
         // Read from SAMLResponse
@@ -413,60 +431,30 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
 
             LOG.debug("SAML Response is [{}]", samlResponse);
 
-            // Parse the response
+            // Parse the response into a DOM tree
             Element responseRoot = this.parsers.parse(new StringReader(samlResponse)).getDocumentElement();
             // Get appropriate unmarshaller
             Unmarshaller unmarshaller = this.unmarshallers.getUnmarshaller(responseRoot);
-            // Unmarshall using the document root element
+            // Unmarshall into Java objects
             Response response = (Response) unmarshaller.unmarshall(responseRoot);
+            if (!validateResponse(response, (String) request.getSession().getAttribute("saml_id"))) {
+                return false;
+            }
 
-            response.validate(true);
-            Signature signature = response.getSignature();
-            this.sigProfileValidator.validate(signature);
-            this.sigValidator.validate(signature);
-
-            boolean isValidDate = true;
-
+            // Process all attributes
             LOG.debug("Reading SAML User data");
-
-            // Verify assertions
             for (Assertion a : response.getAssertions()) {
-                // Find subject assertions
-                if (a.getAuthnStatements().size() > 0) {
-                    if (a.getConditions().getNotOnOrAfter().isBeforeNow()) {
-                        isValidDate = false;
-                    }
-                }
-
-                // Process all attributes
                 for (AttributeStatement attStatement : a.getAttributeStatements()) {
                     for (Attribute att : attStatement.getAttributes()) {
                         for (XMLObject val : att.getAttributeValues()) {
-                            attributes.put(att.getName(), ((XSStringImpl) val).getValue());
-                        }
-                    }
-                    for (EncryptedAttribute att : attStatement.getEncryptedAttributes()) {
-                        for (XMLObject val : ((Attribute) att).getAttributeValues()) {
-                            attributes.put(((Attribute) att).getName(), ((XSStringImpl) val).getValue());
+                            if (val instanceof XSStringImpl) {
+                                attributes.put(att.getName(), ((XSStringImpl) val).getValue());
+                            }
                         }
                     }
                 }
             }
-
-            String samlid1 = response.getInResponseTo();
-            String samlid2 = (String) request.getSession().getAttribute("saml_id");
-            if (!isValidDate) {
-                // Invalid date
-                LOG.error("SAML Dates are invalid");
-                return false;
-            }
-            if (!samlid1.equals(samlid2)) {
-                // invalid ID
-                LOG.error("SAML ID do not match [{}] - [{}]", samlid1, samlid2);
-                return false;
-            }
         } catch (Exception e1) {
-            // failed to read SAMLResponse
             LOG.error("Failed Reading SAML Response", e1);
             return false;
         }
@@ -588,6 +576,39 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
             // Should never happen
         }
         return false;
+    }
+
+    private boolean validateResponse(Response response, String expectedSamlId) throws ValidationException
+    {
+        response.validate(true);
+        Signature signature = response.getSignature();
+        this.sigProfileValidator.validate(signature);
+        this.sigValidator.validate(signature);
+
+        boolean isValidDate = true;
+
+        // Verify date assertions
+        for (Assertion a : response.getAssertions()) {
+            if (a.getAuthnStatements().size() > 0 && a.getConditions() != null
+                && a.getConditions().getNotOnOrAfter() != null) {
+                if (a.getConditions().getNotOnOrAfter().isBeforeNow()) {
+                    isValidDate = false;
+                }
+            }
+        }
+
+        String samlId = response.getInResponseTo();
+        if (!isValidDate) {
+            // Invalid date
+            LOG.error("SAML Dates are invalid");
+            return false;
+        }
+        if (!samlId.equals(expectedSamlId)) {
+            // Invalid ID
+            LOG.error("SAML ID do not match [{}] - [{}]", expectedSamlId, samlId);
+            return false;
+        }
+        return true;
     }
 
     private String getSAMLCertificate(XWikiContext context)
