@@ -34,7 +34,6 @@ import java.io.InputStream;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.net.URLEncoder;
-import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
@@ -154,6 +153,16 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
     /** By default, capitalize each field when generating the username. */
     private static final String DEFAULT_XWIKI_USERNAME_RULE_CAPITALIZE = "1";
 
+    private static final String REQUEST_ID_SESSION_KEY = "saml_id";
+
+    private static final String ORIGINAL_URL_SESSION_KEY = "saml_url";
+
+    private static final String SAML_ID_XPROPERTY_NAME = "nameid";
+
+    private static final String CONFIG_KEY_IDP_CERTIFICATE = "xwiki.authentication.saml.cert";
+
+    private static final String CONFIG_KEY_IDP_URL = "xwiki.authentication.saml.authurl";
+
     /** The document set as the parent of new XWiki user profiles. */
     private static final EntityReference PROFILE_PARENT = new EntityReference("XWikiUsers", EntityType.DOCUMENT,
         new EntityReference(XWiki.SYSTEM_SPACE, EntityType.SPACE));
@@ -198,7 +207,13 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
 
     private SignatureValidator sigValidator;
 
-    public XWikiSAMLAuthenticator() throws XWikiException, CertificateException, IOException
+    /**
+     * Default constructor, initializes the instance members.
+     *
+     * @throws Exception if the initialization fails for any reason, such as missing or bad configuration, missing
+     *             support for cryptography, or server IO errors
+     */
+    public XWikiSAMLAuthenticator() throws Exception
     {
         try {
             DefaultBootstrap.bootstrap();
@@ -220,7 +235,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
         String cert = getSAMLCertificate(Utils.getContext());
         if (StringUtils.isBlank(cert)) {
             LOG.error("Missing configuration key [{}] in xwiki.cfg, SAML authentication is unavailable",
-                "xwiki.authentication.saml.cert");
+                CONFIG_KEY_IDP_CERTIFICATE);
             throw new XWikiException(XWikiException.MODULE_XWIKI_USER,
                 XWikiException.ERROR_XWIKI_INIT_FAILED,
                 "SAML module isn't properly configured, missing certificate file configuration");
@@ -251,7 +266,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
 
         // Generate random request ID
         String randId = RandomStringUtils.randomAlphanumeric(42);
-        request.getSession().setAttribute("saml_id", randId);
+        request.getSession().setAttribute(REQUEST_ID_SESSION_KEY, randId);
         LOG.debug("Random ID: [{}]", randId);
 
         // Remember the requested URL, so we can return to it afterwards
@@ -265,7 +280,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
                 sourceurl = XWiki.getRequestURL(request).toString();
             }
         }
-        request.getSession().setAttribute("saml_url", sourceurl);
+        request.getSession().setAttribute(ORIGINAL_URL_SESSION_KEY, sourceurl);
 
         AuthnRequest authRequest = setupAuthenticationRequest(randId, context);
 
@@ -437,7 +452,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
             Unmarshaller unmarshaller = this.unmarshallers.getUnmarshaller(responseRoot);
             // Unmarshall into Java objects
             Response response = (Response) unmarshaller.unmarshall(responseRoot);
-            if (!validateResponse(response, (String) request.getSession().getAttribute("saml_id"))) {
+            if (!validateResponse(response, (String) request.getSession().getAttribute(REQUEST_ID_SESSION_KEY))) {
                 return false;
             }
 
@@ -468,32 +483,9 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
             LOG.debug("SAML attributes are [{}]", attributes);
             LOG.debug("SAML user data are [{}]", userData);
         }
-
-        String sql = "select distinct obj.name from BaseObject as obj, StringProperty as nameidprop "
-            + "where obj.className=? and obj.id=nameidprop.id.id and nameidprop.id.name=? and nameidprop.value=?";
-        List<String> list = context.getWiki().getStore().search(sql, 1, 0,
-            Arrays.asList(this.compactStringEntityReferenceSerializer.serialize(SAML_XCLASS), "nameid", nameID),
-            context);
-        String validUserName = null;
-        DocumentReference userReference = null;
-
-        if (list.size() == 0) {
-            // User does not exist. Let's generate a unique page name
-            LOG.debug("Did not find XWiki User. Generating it.");
-            String userName = generateXWikiUsername(userData, context);
-            if (userName.equals("")) {
-                userName = "user";
-            }
-            validUserName = context.getWiki().getUniquePageName("XWiki", userName, context);
-            LOG.debug("Generated XWiki User Name [{}]", validUserName);
-        } else {
-            validUserName = list.get(0);
-            LOG.debug("Found XWiki User [{}]", validUserName);
-        }
+        DocumentReference userReference = getLocalUsername(nameID, userData, context);
         // we found a user or generated a unique user name
-        if (validUserName != null) {
-            userReference = this.currentMixedDocumentReferenceResolver.resolve(validUserName, PROFILE_PARENT);
-
+        if (userReference != null) {
             // check if we need to create/update a user page
             String database = context.getDatabase();
             try {
@@ -514,7 +506,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
                         content = "#includeForm(\"XWiki.XWikiUserSheet\")";
                         syntax = Syntax.XWIKI_1_0;
                     }
-                    int result = context.getWiki().createUser(validUserName, userData, PROFILE_PARENT,
+                    int result = context.getWiki().createUser(userReference.getName(), userData, PROFILE_PARENT,
                         content, syntax, "edit", context);
                     if (result < 0) {
                         LOG.error("Failed to create user [{}] with code [{}]", userReference, result);
@@ -522,7 +514,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
                     }
                     XWikiDocument userDoc = context.getWiki().getDocument(userReference, context);
                     BaseObject obj = userDoc.newXObject(SAML_XCLASS, context);
-                    obj.set("nameid", nameID, context);
+                    obj.set(SAML_ID_XPROPERTY_NAME, nameID, context);
                     context.getWiki().saveDocument(userDoc, context);
                     LOG.debug("User [{}] has been successfully created", userReference);
                 } else {
@@ -567,7 +559,7 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
 
         // Successfully logged in, redirect to the originally requested URL
         try {
-            String sourceurl = (String) request.getSession().getAttribute("saml_url");
+            String sourceurl = (String) request.getSession().getAttribute(ORIGINAL_URL_SESSION_KEY);
             LOG.debug("Redirecting after valid authentication to [{}]", sourceurl);
             context.getResponse().sendRedirect(sourceurl);
             context.setFinished(true);
@@ -611,14 +603,44 @@ public class XWikiSAMLAuthenticator extends XWikiAuthServiceImpl
         return true;
     }
 
+    private DocumentReference getLocalUsername(String nameID, Map<String, String> userData, XWikiContext context)
+        throws XWikiException
+    {
+        String sql = "select distinct obj.name from BaseObject as obj, StringProperty as nameidprop "
+            + "where obj.className=? and obj.id=nameidprop.id.id and nameidprop.id.name=? and nameidprop.value=?";
+        List<String> list = context.getWiki().getStore().search(sql, 1, 0,
+            Arrays.asList(this.compactStringEntityReferenceSerializer.serialize(SAML_XCLASS),
+                SAML_ID_XPROPERTY_NAME, nameID), context);
+        String validUserName = null;
+
+        if (list.size() == 0) {
+            // User does not exist. Let's generate a unique page name
+            LOG.debug("Did not find XWiki User. Generating it.");
+            String userName = generateXWikiUsername(userData, context);
+            if (userName.equals("")) {
+                userName = "user";
+            }
+            validUserName = context.getWiki().getUniquePageName("XWiki", userName, context);
+            LOG.debug("Generated XWiki User Name [{}]", validUserName);
+        } else {
+            validUserName = list.get(0);
+            LOG.debug("Found XWiki User [{}]", validUserName);
+        }
+
+        if (validUserName != null) {
+            return this.currentMixedDocumentReferenceResolver.resolve(validUserName, PROFILE_PARENT);
+        }
+        return null;
+    }
+
     private String getSAMLCertificate(XWikiContext context)
     {
-        return context.getWiki().Param("xwiki.authentication.saml.cert");
+        return context.getWiki().Param(CONFIG_KEY_IDP_CERTIFICATE);
     }
 
     private String getSAMLAuthenticatorURL(XWikiContext context)
     {
-        return context.getWiki().Param("xwiki.authentication.saml.authurl");
+        return context.getWiki().Param(CONFIG_KEY_IDP_URL);
     }
 
     private String getSAMLIssuer(XWikiContext context)
