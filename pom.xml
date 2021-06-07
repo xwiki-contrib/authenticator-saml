@@ -28,35 +28,132 @@
   <parent>
     <groupId>org.xwiki.commons</groupId>
     <artifactId>xwiki-commons-pom</artifactId>
-    <version>5.4.6</version>
+    <version>13.3</version>
   </parent>
   <groupId>org.xwiki.contrib.authentication</groupId>
-  <artifactId>xwiki-authenticator-saml</artifactId>
-  <name>xwiki-authentication-saml</name>
+  <artifactId>xwiki-authenticator-saml20</artifactId>
+  <name>XWiki SAML 2.0 Authentication</name>
   <version>1.0-SNAPSHOT</version>
-  <description>XWiki authentication using SAML</description>
+  <description>XWiki authentication using SAML 2.0</description>
+  <developers>
+    <developer>
+      <name>Gabriel Takeuchi</name>
+    </developer>
+  </developers>
   <dependencies>
     <dependency>
       <groupId>org.xwiki.platform</groupId>
       <artifactId>xwiki-platform-oldcore</artifactId>
       <version>${project.parent.version}</version>
       <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.opensaml</groupId>
-      <artifactId>opensaml</artifactId>
-      <version>2.6.1</version>
       <exclusions>
         <exclusion>
           <groupId>commons-logging</groupId>
           <artifactId>commons-logging</artifactId>
         </exclusion>
+        <exclusion>
+          <groupId>org.bouncycastle</groupId>
+          <artifactId>bcprov-jdk15</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>xalan</groupId>
+          <artifactId>serializer</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>xalan</groupId>
+          <artifactId>xalan</artifactId>
+        </exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>com.onelogin</groupId>
+      <artifactId>java-saml</artifactId>
+      <version>2.6.0</version>
     </dependency>
     <dependency>
       <groupId>javax.servlet</groupId>
       <artifactId>servlet-api</artifactId>
       <scope>provided</scope>
+      <version>2.5</version>
     </dependency>
   </dependencies>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-awt-util</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-xml</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-bridge</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-transcoder</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-svg-dom</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-css</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-dom</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-ext</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>batik-gvt</artifactId>
+        <version>1.14</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.xmlgraphics</groupId>
+        <artifactId>xmlgraphics-commons</artifactId>
+        <version>2.6</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.pdfbox</groupId>
+        <artifactId>fontbox</artifactId>
+        <version>2.0.23</version>
+      </dependency>
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>jul-to-slf4j</artifactId>
+        <version>1.7.30</version>
+      </dependency>
+      <dependency>
+        <groupId>io.sf.carte</groupId>
+        <artifactId>css4j-dom4j</artifactId>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <repositories>
+    <repository>
+      <id>xwiki</id>
+      <url>https://nexus.xwiki.org/nexus/content/groups/public</url>
+    </repository>
+    <repository>
+      <id>xwiki-externals</id>
+      <url>https://maven.xwiki.org/externals/</url>
+    </repository>
+  </repositories>
 </project>
